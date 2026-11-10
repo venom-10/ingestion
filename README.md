@@ -79,11 +79,27 @@ The manifest stores row count, timestamp bounds and logical checksum. These chec
 | --- | --- |
 | `DATABASE_URL` | Required PostgreSQL URL (use TLS outside local development) |
 | `S3_BUCKET` | Required archive bucket; `ingest` requires it to exist. `create-bucket` creates it explicitly (RustFS/us-east-1 setup) |
-| `S3_ENDPOINT` | Optional custom S3 endpoint; enables path-style addressing for RustFS |
-| `AWS_REGION` | AWS region; defaults to `us-east-1` |
+| `S3_ENDPOINT` | Optional custom S3 endpoint; enables path-style addressing for RustFS/MinIO |
+| `AWS_REGION` | AWS region; defaults to `us-east-1` when no custom endpoint is configured |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Standard SDK credentials; IAM roles/profiles/default chain also supported |
 
+**Important**: When using a custom `S3_ENDPOINT` (RustFS, MinIO, or other S3-compatible storage), **do not rely on the `us-east-1` default**. Either:
+- Set `AWS_REGION` to match your bucket's actual region, or
+- Leave `AWS_REGION` unset to let the SDK auto-resolve the region from the endpoint
+
+The default `us-east-1` only applies when using AWS S3 directly (no custom endpoint). Using the wrong region with a custom endpoint causes `PermanentRedirect` (HTTP 301) errors because the S3 service redirects to the correct regional endpoint, but the SDK cannot follow the redirect when `BaseEndpoint` is explicitly set.
+
 Prototype `REGION`, `KEY`, `SECRET` remain fallback aliases. Do not commit production credentials. Use least-privilege S3 write access scoped to the archive prefix and database permissions appropriate to the command. Bucket encryption, retention, access policy, backups and lifecycle are deployment responsibilities. Logs go to stderr; successful ingestion emits JSON row/batch/new-block counters on stdout. Row counts include replayed rows; `new_blocks` counts newly indexed blocks only.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `ingest` | Stream, validate, partition, and upload measurements |
+| `migrate` | Create/upgrade the PostgreSQL manifest schema (idempotent) |
+| `create-bucket` | Create the S3 bucket (useful for local RustFS/MinIO) |
+| `generate` | Emit synthetic JSONL measurements to stdout |
+| `find` | Look up candidate object keys by station and day |
 
 ## Verification
 
@@ -97,4 +113,55 @@ ARCHIVE_INTEGRATION=1 go test -run TestIntegration -v
 
 Unit tests cover parsing, validation, batching, cancellation, sink failures, deterministic partitioning, and Parquet round trips. The opt-in integration test covers migration, upload, replay and lookup against real services; it removes its manifests but leaves test objects in S3. It must not target production.
 
-This is a batch ingestion foundation, not a queue consumer, HTTP service or distributed scheduler. There is no station-level query engine, automatic compaction, global deduplication or dead-letter queue yet.
+## Architecture
+
+```
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────┐    ┌────────────┐    ┌───────────┐    ┌──────────────────┐
+│ CSV/JSONL   │───▶│ Validate &   │───▶│ Partition by │───▶│ Sort by    │───▶│ Zstd     │───▶│ Upload   │───▶│ PostgreSQL│
+│ Input       │    │ Normalize    │    │ (group, day) │    │ station/   │    │ Compress │    │ to S3    │    │ Manifest  │
+└─────────────┘    └──────────────┘    └──────────────┘    │ time/      │    └──────────┘    └────────────┘    └───────────┘
+                                                          │ temp       │
+                                                          └────────────┘
+```
+
+- **Deterministic keys**: S3 object keys are SHA-256 of sorted logical rows (station, timestamp, temperature). Identical input produces identical keys, enabling safe replay.
+- **Idempotent migration**: `migrate` is safe to run repeatedly; it extends compatible prototype tables without data loss.
+- **Path-style addressing**: Enabled automatically when `S3_ENDPOINT` is set, required for RustFS/MinIO.
+- **ARN region resolution**: When using custom endpoints, `UseARNRegion=true` allows the SDK to resolve the bucket's region from its ARN, enabling proper cross-region redirect handling.
+
+## Troubleshooting
+
+### PermanentRedirect (HTTP 301) on upload
+
+```
+api error PermanentRedirect: The bucket you are attempting to access must be addressed using the specified endpoint.
+```
+
+**Cause**: The S3 client is configured for the wrong region. With a custom `S3_ENDPOINT`, the SDK defaults to `us-east-1` unless explicitly configured otherwise.
+
+**Fix**: Set `AWS_REGION` to your bucket's actual region, or leave it unset to let the SDK auto-resolve from the endpoint:
+
+```sh
+# Option 1: Explicit region
+export AWS_REGION=eu-west-1
+
+# Option 2: Auto-resolve (recommended for RustFS/MinIO)
+unset AWS_REGION
+export S3_ENDPOINT=http://localhost:9000
+```
+
+### Connection refused / timeout
+
+- Verify `S3_ENDPOINT` is correct and the service is running (`curl $S3_ENDPOINT/minio/health/live`)
+- Check firewall/security groups allow the port
+- For Docker Compose, ensure services are healthy (`docker compose ps`)
+
+### Database connection failed
+
+- Verify `DATABASE_URL` format: `postgres://user:pass@host:port/db?sslmode=disable`
+- Check PostgreSQL is running and accepting connections
+- Run `./archive-lab migrate` to ensure schema exists
+
+## License
+
+MIT
