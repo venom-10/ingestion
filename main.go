@@ -171,6 +171,9 @@ func newObjectClient(ctx context.Context) (*s3.Client, error) {
 		if endpoint := os.Getenv("S3_ENDPOINT"); endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 			o.UsePathStyle = true
+			// Enable ARN-based region resolution for cross-region redirect handling
+			// with custom endpoints (RustFS, MinIO, etc.)
+			o.UseARNRegion = true
 		}
 	}), nil
 }
