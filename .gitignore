@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+/archive-lab
+*.parquet
+/data/
+/coverage.out
