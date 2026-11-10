@@ -2,27 +2,46 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
-	"os"
+	_ "embed"
+	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func ConnectDB(ctx context.Context) *pgxpool.Pool {
-	dbUrl := os.Getenv("DATABASE_URL")
+//go:embed migrations/001_archive.sql
+var schema string
 
-	db, err := pgxpool.New(ctx, dbUrl)
-
+func ConnectDB(ctx context.Context, url string) (*pgxpool.Pool, error) {
+	if url == "" {
+		return nil, errors.New("DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	db, err := pgxpool.New(ctx, url)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	// defer db.Close()
-
-	if err := db.Ping(ctx); err != nil {
-		log.Fatal("PostgreSQL connection failed:", err)
+	if err = db.Ping(ctx); err != nil {
+		db.Close()
+		return nil, err
 	}
+	return db, nil
+}
 
-	fmt.Println("PostgreSQL connected!")
-	return db;
+func findBlocks(ctx context.Context, db *pgxpool.Pool, station int64, day string) ([]string, error) {
+	rows, err := db.Query(ctx, `SELECT object_key FROM archive_blocks WHERE group_id=$1 AND day=$2::date ORDER BY object_key`, int16(makeGroup(station)), day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []string{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
 }
