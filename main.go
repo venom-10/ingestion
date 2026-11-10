@@ -28,6 +28,23 @@ func main() {
 	}
 }
 
+// resolveRegion determines the AWS region to use.
+// When a custom S3_ENDPOINT is configured (RustFS, MinIO, etc.),
+// we don't default to us-east-1. Instead, we let the SDK resolve
+// the region from the endpoint or use the explicitly configured region.
+func resolveRegion() string {
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = os.Getenv("REGION")
+	}
+	// When using a custom endpoint, don't default to us-east-1.
+	// Let the SDK resolve the region from the endpoint.
+	if region == "" && os.Getenv("S3_ENDPOINT") == "" {
+		region = "us-east-1"
+	}
+	return region
+}
+
 func run(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: archive-lab <ingest|migrate|find|generate|create-bucket> [flags]")
@@ -136,14 +153,11 @@ func newObjectClient(ctx context.Context) (*s3.Client, error) {
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" && os.Getenv("KEY") != "" {
 		opts = append(opts, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(os.Getenv("KEY"), os.Getenv("SECRET"), "")))
 	}
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = os.Getenv("REGION")
+	region := resolveRegion()
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
 	}
-	if region == "" {
-		region = "us-east-1"
-	}
-	opts = append(opts, awsconfig.WithRegion(region), awsconfig.WithRetryMaxAttempts(5))
+	opts = append(opts, awsconfig.WithRetryMaxAttempts(5))
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, err
