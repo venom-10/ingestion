@@ -32,6 +32,11 @@ func main() {
 // When a custom S3_ENDPOINT is configured (RustFS, MinIO, etc.),
 // we don't default to us-east-1. Instead, we let the SDK resolve
 // the region from the endpoint or use the explicitly configured region.
+//
+// This fixes the PermanentRedirect error (HTTP 301) that occurs when
+// the client defaults to us-east-1 but the bucket exists in a different
+// region. The S3 service responds with a redirect to the correct regional
+// endpoint, but with a custom BaseEndpoint the SDK cannot follow it.
 func resolveRegion() string {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
